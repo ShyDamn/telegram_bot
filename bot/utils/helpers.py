@@ -4,6 +4,17 @@ from urllib.parse import urlparse
 import re
 from typing import Optional
 
+def to_snake_case(s):
+    return re.sub(r'(?<!^)(?=[A-Z])', '_', s).lower()
+
+def normalize_keys(data):
+    if isinstance(data, list):
+        return [normalize_keys(item) for item in data]
+    elif isinstance(data, dict):
+        return {to_snake_case(key): normalize_keys(value) for key, value in data.items()}
+    else:
+        return data
+
 def generate_token(user_id: int) -> str:
     # Генерация уникального токена для пользователя
     return hashlib.md5(f"{user_id}:{datetime.now().timestamp()}".encode()).hexdigest()

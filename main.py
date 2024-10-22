@@ -34,7 +34,7 @@ dp.update.middleware(middleware_handler)
 @dp.message(Command('start'))
 async def start_command(message: types.Message, redis_client: RedisClient):
     user_id = message.from_user.id
-    token = redis_client.get_user_token(user_id)
+    token = await redis_client.get_user_token(user_id)
 
     if token:
         # Пользователь зарегистрирован

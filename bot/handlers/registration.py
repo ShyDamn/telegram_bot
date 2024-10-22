@@ -12,14 +12,14 @@ def generate_token(user_id: int) -> str:
 @router.message(Command(commands=['registration']))
 async def registration(message: types.Message, redis_client: RedisClient):
     user_id = message.from_user.id
-    existing_token = redis_client.get_user_token(user_id)
+    existing_token = await redis_client.get_user_token(user_id)
     
     if existing_token:
         await message.answer("Вы уже зарегистрированы. Используйте /delete_account, чтобы удалить аккаунт.")
         return
 
     token = generate_token(user_id)
-    redis_client.save_user(user_id, token)
+    await redis_client.save_user(user_id, token)
 
     instruction = (
         f"✅ Регистрация успешна! Ваш токен: <code>{token}</code>\n"
@@ -47,14 +47,14 @@ async def registration(message: types.Message, redis_client: RedisClient):
 @router.callback_query(lambda c: c.data == 'registration')
 async def registration_callback(callback_query: CallbackQuery, redis_client: RedisClient):
     user_id = callback_query.from_user.id
-    existing_token = redis_client.get_user_token(user_id)
+    existing_token = await redis_client.get_user_token(user_id)
     
     if existing_token:
         await callback_query.message.answer("Вы уже зарегистрированы. Используйте /delete_account, чтобы удалить аккаунт.")
         return
 
     token = generate_token(user_id)
-    redis_client.save_user(user_id, token)
+    await redis_client.save_user(user_id, token)
 
     instruction = (
         f"✅ Регистрация успешна! Ваш токен: <code>{token}</code>\n"
@@ -81,7 +81,7 @@ async def registration_callback(callback_query: CallbackQuery, redis_client: Red
 @router.message(Command(commands=['delete_account']))
 async def delete_account(message: types.Message, redis_client: RedisClient):
     user_id = message.from_user.id
-    redis_client.delete_user(user_id)
+    await redis_client.delete_user(user_id)
 
     # После удаления аккаунта отображаем кнопку регистрации
     keyboard = InlineKeyboardMarkup(
@@ -98,7 +98,7 @@ async def delete_account(message: types.Message, redis_client: RedisClient):
 @router.callback_query(lambda c: c.data == 'delete_account')
 async def delete_account_callback(callback_query: CallbackQuery, redis_client: RedisClient):
     user_id = callback_query.from_user.id
-    redis_client.delete_user(user_id)
+    await redis_client.delete_user(user_id)
 
     # После удаления аккаунта отображаем кнопку регистрации
     keyboard = InlineKeyboardMarkup(
