@@ -1,3 +1,4 @@
+# redis_client.py
 import redis
 import json
 
@@ -41,3 +42,11 @@ class RedisClient:
             if cursor == '0':
                 break
         return user_ids
+
+    def is_already_parsed(self, user_id: int, product_url: str) -> bool:
+        """Проверяет, был ли товар уже обработан"""
+        return bool(self.client.sismember(f"parsed:{user_id}", product_url))
+
+    def mark_as_parsed(self, user_id: int, product_url: str):
+        """Помечает товар как обработанный"""
+        self.client.sadd(f"parsed:{user_id}", product_url)
