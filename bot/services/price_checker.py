@@ -16,36 +16,60 @@ class PriceChecker:
         if not product_url:
             logging.error(f"Отсутствует 'product_url' для продукта: {product}")
             return
-        current_price = await self.parser.get_price(product_url)
-        if current_price is None:
-            logging.error(f"Не удалось получить цену для '{product.get('title', 'No Title')}'")
-            return
-        logging.debug(f"Текущая цена для '{product.get('title', 'No Title')}': {current_price}")
-        target_price = float(product.get('target_price', 0))
-        if current_price <= target_price:
-            is_parsed = await self.redis_client.is_already_parsed(user_id, product_url)
-            if not is_parsed:
-                logging.info(f"Отправка уведомления для пользователя {user_id}, товар '{product.get('title', 'No Title')}'")
-                await self.notification_service.send_price_alert(
-                    user_id=user_id,
-                    product_title=product.get('title', 'No Title'),
-                    current_price=current_price,
-                    target_price=target_price,
-                    product_url=product_url
-                )
-                await self.redis_client.mark_as_parsed(user_id, product_url)
+        try:
+            # Таймаут для получения цены
+            current_price = await asyncio.wait_for(self.parser.get_price(product_url), timeout=60)
+            
+            if current_price is None:
+                logging.error(f"Не удалось получить цену для '{product.get('title', 'No Title')}'")
+                return
+            
+            logging.debug(f"Текущая цена для '{product.get('title', 'No Title')}': {current_price}")
+            
+            target_price = float(product.get('target_price', 0))
+            logging.debug(f"Целевая цена: {target_price}")
+
+            # Проверка текущей цены с целевой
+            if current_price <= target_price:
+                logging.debug(f"Текущая цена {current_price} меньше или равна целевой {target_price}. Проверяем Redis...")
+
+                # Проверка, было ли уведомление уже отправлено
+                is_parsed = await self.redis_client.is_already_parsed(user_id, product_url)
+                logging.debug(f"Статус Redis (уведомление уже отправлено?): {is_parsed}")
+
+                if not is_parsed:
+                    logging.info(f"Отправка уведомления для пользователя {user_id}, товар '{product.get('title', 'No Title')}'")
+                    await self.notification_service.send_price_alert(
+                        user_id=user_id,
+                        product_title=product.get('title', 'No Title'),
+                        current_price=current_price,
+                        target_price=target_price,
+                        product_url=product_url
+                    )
+                    logging.info(f"Уведомление отправлено пользователю {user_id} о продукте '{product.get('title', 'No Title')}'")
+                    
+                    await self.redis_client.mark_as_parsed(user_id, product_url)
+                    logging.debug(f"Пометка товара как обработанного в Redis завершена для товара {product.get('title', 'No Title')}")
+                else:
+                    logging.debug(f"Уведомление для '{product.get('title', 'No Title')}' уже было отправлено")
             else:
-                logging.debug(f"Уведомление для '{product.get('title', 'No Title')}' уже было отправлено")
-        else:
-            logging.debug(f"Нет необходимости отправлять уведомление для '{product.get('title', 'No Title')}'. Текущая цена: {current_price}, Целевая цена: {target_price}")
+                logging.debug(f"Текущая цена {current_price} выше целевой {target_price}. Уведомление не требуется.")
+
+        except asyncio.TimeoutError:
+            logging.error(f"Таймаут при проверке цены для '{product.get('title', 'No Title')}'")
+        except Exception as e:
+            logging.error(f"Ошибка при проверке цены для '{product.get('title', 'No Title')}': {e}")
 
     async def start_monitoring(self):
         logging.info("PriceChecker monitoring started")
         while True:
-            users = await self.redis_client.get_all_users()
-            for user_id in users:
-                products = await self.redis_client.get_products(user_id)
-                tasks = [self.check_price_for_product(user_id, product) for product in products]
-                if tasks:
-                    await asyncio.gather(*tasks)
-            await asyncio.sleep(300)  # Проверка каждые 5 минут
+            try:
+                users = await self.redis_client.get_all_users()
+                for user_id in users:
+                    products = await self.redis_client.get_products(user_id)
+                    tasks = [self.check_price_for_product(user_id, product) for product in products]
+                    if tasks:
+                        await asyncio.gather(*tasks)
+                await asyncio.sleep(300)  # Интервал проверки цен каждые 5 минут
+            except Exception as e:
+                logging.error(f"Ошибка в процессе мониторинга цен: {e}")
