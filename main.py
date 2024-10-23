@@ -34,7 +34,7 @@ dp.update.middleware(middleware_handler)
 @dp.message(Command('start'))
 async def start_command(message: types.Message, redis_client: RedisClient):
     user_id = message.from_user.id
-    token = await redis_client.get_user_token(user_id)
+    token = redis_client.get_user_token(user_id)
 
     if token:
         # Пользователь зарегистрирован
@@ -68,15 +68,18 @@ dp.include_router(registration_router)
 dp.include_router(notifications_router)
 
 async def main():
-    # Создаём экземпляры
-    notification_service = NotificationService(bot=bot)
-    price_checker = PriceChecker(redis_client=redis_client, notification_service=notification_service)
+    try:
+        notification_service = NotificationService(bot=bot)
+        price_checker = PriceChecker(redis_client=redis_client, notification_service=notification_service)
 
-    # Создаём фоновую задачу
-    asyncio.create_task(price_checker.start_monitoring())
-
-    # Запускаем polling
-    await dp.start_polling(bot)
+        monitoring_task = asyncio.create_task(price_checker.start_monitoring())
+        
+        polling_task = asyncio.create_task(dp.start_polling(bot))
+        
+        await asyncio.gather(monitoring_task, polling_task)
+    except Exception as e:
+        logging.error(f"Критическая ошибка в main: {e}")
+        raise
 
 if __name__ == '__main__':
     asyncio.run(main())
