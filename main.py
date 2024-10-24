@@ -10,14 +10,13 @@ from bot.services.price_checker import PriceChecker
 
 import logging
 
-# Настройка логирования
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 load_dotenv()
 bot_token = os.getenv('TELEGRAM_TOKEN')
 
 if not bot_token:
-    print("Error: TELEGRAM_TOKEN not found in .env file.")
+    print("Error: TELEGRAM_TOKEN не найден в .env")
     exit(1)
 
 bot = Bot(token=bot_token)

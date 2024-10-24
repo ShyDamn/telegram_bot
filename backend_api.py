@@ -8,7 +8,7 @@ import json
 app = FastAPI()
 
 origins = [
-    "chrome-extension://foeoaadfahjabcallokbjcealecoljan",
+    "chrome-extension://mblpdaabhchjhbohfcggccfkcnpdnalc",
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:8000",
@@ -17,7 +17,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # разрешаем доступ с доменов
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
