@@ -20,7 +20,7 @@ if not bot_token:
     exit(1)
 
 bot = Bot(token=bot_token)
-dp = Dispatcher()
+dp = Dispatcher()  # Убираем передачу бота в Dispatcher
 
 redis_client = RedisClient()
 
@@ -68,12 +68,18 @@ dp.include_router(notifications_router)
 
 async def main():
     try:
+        redis_client = RedisClient()
+        
         notification_service = NotificationService(bot=bot)
-        price_checker = PriceChecker(redis_client=redis_client, notification_service=notification_service)
+        price_checker = PriceChecker(
+            redis_client=redis_client,
+            notification_service=notification_service,
+            batch_size=50,
+            concurrent_workers=50 
+        )
 
         monitoring_task = asyncio.create_task(price_checker.start_monitoring())
-        
-        polling_task = asyncio.create_task(dp.start_polling(bot))
+        polling_task = asyncio.create_task(dp.start_polling(bot)) 
         
         await asyncio.gather(monitoring_task, polling_task)
     except Exception as e:
