@@ -53,9 +53,6 @@ class PriceParser:
 
         self.driver_path = "./chromedriver.exe"
         
-        # Пул соединений aiohttp для Wildberries API
-        self.session: Optional[aiohttp.ClientSession] = None
-        
         self.selectors = {
             'ozon': {
                 'css': [
@@ -73,21 +70,10 @@ class PriceParser:
             }
         }
 
-    async def __aenter__(self):
-        """Инициализация aiohttp сессии при входе в контекстный менеджер"""
-        self.session = aiohttp.ClientSession()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Закрытие aiohttp сессии при выходе из контекстного менеджера"""
-        if self.session:
-            await self.session.close()
-            self.session = None
-
     @asynccontextmanager
     async def get_driver(self):
         """Контекстный менеджер для работы с браузером"""
-        async with self.browser_semaphore:  # Ограничиваем количество одновременных браузеров
+        async with self.browser_semaphore:
             service = Service(self.driver_path)
             driver = webdriver.Chrome(service=service, options=self.chrome_options)
             try:
@@ -105,11 +91,10 @@ class PriceParser:
         :param urls: Список URL-адресов товаров
         :return: Словарь с ценами, где ключ - URL, значение - цена или None
         """
-        async with self:  # Инициализируем aiohttp сессию
-            tasks = [self.get_price(url) for url in urls]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            return {url: price if not isinstance(price, Exception) else None 
-                   for url, price in zip(urls, results)}
+        tasks = [self.get_price(url) for url in urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return {url: price if not isinstance(price, Exception) else None 
+                for url, price in zip(urls, results)}
 
     async def get_price(self, url: str) -> Optional[float]:
         """
@@ -210,22 +195,19 @@ class PriceParser:
         api_url = f'https://card.wb.ru/cards/detail?dest=-1257786&nm={product_id}'
         headers = {'User-Agent': random.choice(self.user_agents)}
 
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-
-        try:
-            async with self.session.get(api_url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    try:
-                        price = data['data']['products'][0].get('salePriceU', 0) / 100
-                        return price
-                    except (KeyError, IndexError):
-                        logging.error("Ошибка при парсинге данных Wildberries API")
-                else:
-                    logging.error(f"Ошибка Wildberries API, код: {response.status}")
-        except Exception as e:
-            logging.error(f"Ошибка при запросе к Wildberries API: {e}")
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(api_url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        try:
+                            return data['data']['products'][0].get('salePriceU', 0) / 100
+                        except (KeyError, IndexError, TypeError):
+                            logging.error(f"Ошибка при парсинге данных Wildberries API для URL {url}")
+                    else:
+                        logging.error(f"Ошибка Wildberries API, код: {response.status}, URL: {url}")
+            except Exception as e:
+                logging.error(f"Ошибка при запросе к Wildberries API для {url}: {e}")
         
         return None
 

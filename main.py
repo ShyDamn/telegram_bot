@@ -71,14 +71,13 @@ dp.include_router(notifications_router)
 async def main():
     try:
         notification_service = NotificationService(bot=bot)
-        price_checker = PriceChecker(
-            redis_client=redis_client, 
-            notification_service=notification_service
-        )
-        
+        price_checker = PriceChecker(redis_client=redis_client, notification_service=notification_service)
+
+        # Запускаем мониторинг в отдельной задаче
         monitoring_task = asyncio.create_task(price_checker.start_monitoring())
         polling_task = asyncio.create_task(dp.start_polling(bot))
-        
+
+        # Ожидаем завершения обеих задач
         await asyncio.gather(monitoring_task, polling_task)
         
     except Exception as e:
@@ -86,6 +85,7 @@ async def main():
         raise
     finally:
         await cleanup()
+
 
 async def cleanup():
     """Очистка ресурсов"""
