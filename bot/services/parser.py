@@ -3,7 +3,7 @@ import logging
 import re
 import asyncio
 import sys
-from typing import Optional, List, Dict
+from typing import Optional, Dict, List
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -12,79 +12,50 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 import aiohttp
-from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from selenium.webdriver.chrome.webdriver import WebDriver
 from contextlib import asynccontextmanager
 
-@dataclass
-class ParseResult:
-    url: str
-    price: Optional[float]
-    error: Optional[str] = None
-
-class DriverPool:
-    def __init__(self, pool_size: int = 5):
-        self.pool_size = pool_size
-        self.drivers: List[webdriver.Chrome] = []
-        self.available_drivers = asyncio.Queue()
-        self.setup_complete = False
-        
-    async def setup(self):
-        if self.setup_complete:
-            return
-            
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument('--enable-logging')
-        chrome_options.add_argument('--log-level=3')
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-
-        with ThreadPoolExecutor(max_workers=self.pool_size) as executor:
-            futures = []
-            for _ in range(self.pool_size):
-                futures.append(executor.submit(self._create_driver, chrome_options))
-            
-            for future in futures:
-                driver = future.result()
-                await self.available_drivers.put(driver)
-                self.drivers.append(driver)
-        
-        self.setup_complete = True
-
-    def _create_driver(self, options):
-        service = Service("./chromedriver.exe")
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_window_size(1920, 1080)
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        return driver
-
-    @asynccontextmanager
-    async def get_driver(self):
-        driver = await self.available_drivers.get()
-        try:
-            yield driver
-        finally:
-            await self.available_drivers.put(driver)
-
-    async def cleanup(self):
-        for driver in self.drivers:
-            driver.quit()
-        self.drivers.clear()
-        self.setup_complete = False
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('./logs/parser.log', encoding='UTF-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 class PriceParser:
-    def __init__(self, concurrent_workers: int = 5):
-        self.driver_pool = DriverPool(pool_size=concurrent_workers)
+    def __init__(self, max_concurrent_browsers: int = 5):
+        """
+        Инициализация парсера с ограничением количества одновременных браузеров
+        
+        :param max_concurrent_browsers: Максимальное количество одновременно открытых браузеров
+        """
+        self.max_concurrent_browsers = max_concurrent_browsers
+        self.browser_semaphore = asyncio.Semaphore(max_concurrent_browsers)
+        
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.77 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/12.1.1 Safari/605.1.15',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.87 Safari/537.36'
         ]
+        
+        self.chrome_options = Options()
+        self.chrome_options.add_argument("--headless")
+        self.chrome_options.add_argument("--no-sandbox")
+        self.chrome_options.add_argument("--disable-dev-shm-usage")
+        self.chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        self.chrome_options.add_argument("--disable-gpu")
+        self.chrome_options.add_argument('--enable-logging')
+        self.chrome_options.add_argument('--log-level=3')
+        self.chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        self.chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        self.driver_path = "./chromedriver.exe"
+        
+        # Пул соединений aiohttp для Wildberries API
+        self.session: Optional[aiohttp.ClientSession] = None
+        
         self.selectors = {
             'ozon': {
                 'css': [
@@ -101,113 +72,164 @@ class PriceParser:
                 ]
             }
         }
-        self.wb_session: Optional[aiohttp.ClientSession] = None
-        
-    async def setup(self):
-        await self.driver_pool.setup()
-        self.wb_session = aiohttp.ClientSession(
-            headers={'User-Agent': random.choice(self.user_agents)},
-            timeout=aiohttp.ClientTimeout(total=30)
-        )
 
-    async def parse_urls(self, urls: List[str]) -> List[ParseResult]:
-        tasks = []
-        for url in urls:
-            if 'wildberries.ru' in url:
-                tasks.append(self._get_price_from_wildberries(url))
-            else:
-                tasks.append(self._get_price_with_selenium(url))
-        
-        results = await asyncio.gather(*tasks)
-        return results
+    async def __aenter__(self):
+        """Инициализация aiohttp сессии при входе в контекстный менеджер"""
+        self.session = aiohttp.ClientSession()
+        return self
 
-    async def _get_price_with_selenium(self, url: str) -> ParseResult:
-        async with self.driver_pool.get_driver() as driver:
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Закрытие aiohttp сессии при выходе из контекстного менеджера"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+    @asynccontextmanager
+    async def get_driver(self):
+        """Контекстный менеджер для работы с браузером"""
+        async with self.browser_semaphore:  # Ограничиваем количество одновременных браузеров
+            service = Service(self.driver_path)
+            driver = webdriver.Chrome(service=service, options=self.chrome_options)
             try:
-                driver.execute_cdp_cmd('Network.setUserAgentOverride', 
-                                    {"userAgent": random.choice(self.user_agents)})
+                driver.set_window_size(1920, 1080)
+                driver.execute_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                yield driver
+            finally:
+                driver.quit()
+
+    async def get_prices_batch(self, urls: List[str]) -> Dict[str, Optional[float]]:
+        """
+        Получение цен для списка URL-адресов параллельно
+        
+        :param urls: Список URL-адресов товаров
+        :return: Словарь с ценами, где ключ - URL, значение - цена или None
+        """
+        async with self:  # Инициализируем aiohttp сессию
+            tasks = [self.get_price(url) for url in urls]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return {url: price if not isinstance(price, Exception) else None 
+                   for url, price in zip(urls, results)}
+
+    async def get_price(self, url: str) -> Optional[float]:
+        """
+        Получение цены товара в зависимости от магазина
+        
+        :param url: URL товара
+        :return: Цена товара или None в случае ошибки
+        """
+        try:
+            if 'wildberries.ru' in url:
+                return await self._get_price_from_wildberries(url)
+            else:
+                return await self._get_price_with_selenium(url)
+        except Exception as e:
+            logging.error(f"Ошибка при получении цены для {url}: {e}")
+            return None
+
+    async def _get_price_with_selenium(self, url: str) -> Optional[float]:
+        """Получение цены с использованием Selenium"""
+        async with self.get_driver() as driver:
+            try:
+                driver.execute_cdp_cmd('Network.setUserAgentOverride',
+                                     {"userAgent": random.choice(self.user_agents)})
                 driver.get(url)
-                await asyncio.sleep(random.uniform(1, 2))
+                await asyncio.sleep(random.uniform(2, 4))
 
                 if 'market.yandex.ru' in url:
                     await self._handle_challenge(driver, 'market')
                 elif 'ozon.ru' in url:
                     await self._handle_challenge(driver, 'ozon')
 
-                price = await self._find_price(driver, url)
-                return ParseResult(url=url, price=price)
+                return await self._find_price(driver, url)
 
             except WebDriverException as e:
                 logging.error(f"Ошибка WebDriver для URL {url}: {e}")
-                return ParseResult(url=url, price=None, error=str(e))
+                return None
 
-    async def _handle_challenge(self, driver, site: str):
-        if site == 'ozon':
-            try:
-                wait = WebDriverWait(driver, 3)
-                refresh_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Обновить')]")))
-                await asyncio.sleep(3)
-                refresh_button.click()
-                await asyncio.sleep(2)
-            except TimeoutException:
-                logging.info("Антибот-проблем не обнаружено.")
-        elif site == 'market':
-            try:
-                wait = WebDriverWait(driver, 10)
-                captcha_checkbox = wait.until(EC.element_to_be_clickable((By.ID, "js-button")))
-                captcha_checkbox.click()
-                await asyncio.sleep(2)
-            except TimeoutException:
-                logging.error("Не удалось пройти капчу на Яндекс.Маркете.")
-
-    async def _find_price(self, driver, url: str) -> Optional[float]:
+    async def _find_price(self, driver: WebDriver, url: str) -> Optional[float]:
+        """Поиск цены на странице по селекторам"""
         marketplace = 'ozon' if 'ozon.ru' in url else 'market.yandex'
         selectors = self.selectors[marketplace]
-        wait = WebDriverWait(driver, 10)
+        wait = WebDriverWait(driver, 3)
 
         for selector in selectors['css']:
             try:
-                price_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                price_element = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
                 price = self._extract_price(price_element.text)
                 if price is not None:
                     return price
             except (TimeoutException, NoSuchElementException):
                 continue
+
+        logging.error(f"Цена не найдена для {url}")
+        driver.save_screenshot(f"./logs/debug_{marketplace}_screenshot.png")
         return None
 
-    async def _get_price_from_wildberries(self, url: str) -> ParseResult:
-        product_id = self.extract_wildberries_product_id(url)
+    async def _handle_challenge(self, driver: WebDriver, site: str):
+        """Обработка антибот-защиты"""
+        if site == 'ozon':
+            try:
+                wait = WebDriverWait(driver, 3)
+                refresh_button = wait.until(EC.element_to_be_clickable(
+                    (By.XPATH, "//button[contains(text(),'Обновить')]")))
+                await asyncio.sleep(3)
+                refresh_button.click()
+                await asyncio.sleep(2)
+            except TimeoutException:
+                logging.info("Антибот-защита не обнаружена")
+        elif site == 'market':
+            try:
+                wait = WebDriverWait(driver, 2)
+                captcha_checkbox = wait.until(
+                    EC.element_to_be_clickable((By.ID, "js-button")))
+                captcha_checkbox.click()
+                await asyncio.sleep(3)
+            except TimeoutException:
+                logging.error("Не удалось пройти капчу на Яндекс.Маркете")
+                driver.save_screenshot("./logs/yandex_captcha_error.png")
+
+    def _extract_price(self, price_text: str) -> Optional[float]:
+        """Извлечение числового значения цены из текста"""
+        try:
+            price_text = price_text.replace('\xa0', '').replace(' ', '').replace(
+                ' ', '').replace('₽', '').replace(',', '.').strip()
+            return float(re.sub(r'[^0-9.]', '', price_text))
+        except (ValueError, AttributeError):
+            logging.error(f"Ошибка извлечения цены из текста: {price_text}")
+            return None
+
+    async def _get_price_from_wildberries(self, url: str) -> Optional[float]:
+        """Получение цены с Wildberries через API"""
+        product_id = self._extract_wildberries_product_id(url)
         if not product_id:
-            return ParseResult(url=url, price=None, error="Invalid URL format")
+            logging.error(f"Не удалось извлечь ID товара из URL: {url}")
+            return None
 
         api_url = f'https://card.wb.ru/cards/detail?dest=-1257786&nm={product_id}'
+        headers = {'User-Agent': random.choice(self.user_agents)}
+
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+
         try:
-            async with self.wb_session.get(api_url) as response:
+            async with self.session.get(api_url, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
                     try:
-                        price = data['data']['products'][0].get('salePriceU') / 100
-                        return ParseResult(url=url, price=price)
+                        price = data['data']['products'][0].get('salePriceU', 0) / 100
+                        return price
                     except (KeyError, IndexError):
-                        return ParseResult(url=url, price=None, error="Failed to parse API response")
+                        logging.error("Ошибка при парсинге данных Wildberries API")
                 else:
-                    return ParseResult(url=url, price=None, error=f"API error: {response.status}")
+                    logging.error(f"Ошибка Wildberries API, код: {response.status}")
         except Exception as e:
-            return ParseResult(url=url, price=None, error=str(e))
+            logging.error(f"Ошибка при запросе к Wildberries API: {e}")
+        
+        return None
 
-    def extract_wildberries_product_id(self, url: str) -> Optional[str]:
+    def _extract_wildberries_product_id(self, url: str) -> Optional[str]:
+        """Извлечение ID товара из URL Wildberries"""
         match = re.search(r'/catalog/(\d+)/', url)
         return match.group(1) if match else None
-
-    async def cleanup(self):
-        await self.driver_pool.cleanup()
-        if self.wb_session:
-            await self.wb_session.close()
-
-    @staticmethod
-    def _extract_price(price_text: str) -> Optional[float]:
-        try:
-            price_text = price_text.replace('\xa0', '').replace(' ', '').replace('₽', '').replace(',', '.').strip()
-            return float(re.sub(r'[^0-9.]', '', price_text))
-        except (ValueError, AttributeError):
-            return None

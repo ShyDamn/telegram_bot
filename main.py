@@ -7,20 +7,22 @@ from database.redis_client import RedisClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.services.notification_service import NotificationService
 from bot.services.price_checker import PriceChecker
+import logging
 
 import logging
 
+# Настройка логирования
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 load_dotenv()
 bot_token = os.getenv('TELEGRAM_TOKEN')
 
 if not bot_token:
-    print("Error: TELEGRAM_TOKEN не найден в .env")
+    print("Error: TELEGRAM_TOKEN not found in .env file.")
     exit(1)
 
 bot = Bot(token=bot_token)
-dp = Dispatcher()  # Убираем передачу бота в Dispatcher
+dp = Dispatcher()
 
 redis_client = RedisClient()
 
@@ -68,23 +70,44 @@ dp.include_router(notifications_router)
 
 async def main():
     try:
-        redis_client = RedisClient()
-        
         notification_service = NotificationService(bot=bot)
         price_checker = PriceChecker(
-            redis_client=redis_client,
-            notification_service=notification_service,
-            batch_size=50,
-            concurrent_workers=50 
+            redis_client=redis_client, 
+            notification_service=notification_service
         )
-
+        
         monitoring_task = asyncio.create_task(price_checker.start_monitoring())
-        polling_task = asyncio.create_task(dp.start_polling(bot)) 
+        polling_task = asyncio.create_task(dp.start_polling(bot))
         
         await asyncio.gather(monitoring_task, polling_task)
+        
     except Exception as e:
-        logging.error(f"Критическая ошибка в main: {e}")
+        logging.error(f"Критическая ошибка в main: {e}", exc_info=True)
         raise
+    finally:
+        await cleanup()
+
+async def cleanup():
+    """Очистка ресурсов"""
+    try:
+        await bot.session.close() 
+
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+    except Exception as e:
+        logging.error(f"Ошибка при очистке ресурсов: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Получен сигнал KeyboardInterrupt")
+    except Exception as e:
+        logging.error(f"Неперехваченное исключение: {e}", exc_info=True)
+    finally:
+        logging.info("Приложение завершено")

@@ -8,7 +8,8 @@ class RedisClient:
         self.client = redis.Redis(host=host, port=port, db=db, decode_responses=True)
 
     async def save_user(self, user_id: int, token: str):
-        await self.client.hset(f"user:{user_id}", mapping={"token": token, "is_active": "1"})
+        data = {"token": token, "is_active": "1"}
+        await self.client.hmset(f"user:{user_id}", data)
 
     async def get_user_token(self, user_id: int) -> str:
         return await self.client.hget(f"user:{user_id}", "token")
