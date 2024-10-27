@@ -19,10 +19,41 @@
 ```
 git clone https://github.com/ShyDamn/Google_viewer
 ```
-2. Откройте Chrome и перейдите в раздел "Расширения" (введите `chrome://extensions/` в адресной строке).
-3. Включите "Режим разработчика" в правом верхнем углу страницы.
-4. Нажмите "Загрузить распакованное расширение" и выберите папку с расширением.
-5. Расширение установлено! Вы увидите иконку в правом верхнем углу браузера.
+2. В файле subscription.js измените:
+```
+this.SUBSCRIPTION_PRICE = цена в рублях на товар
+this.TOKEN = 'ТОКЕН ПРИЛОЖЕНИЯ'
+```
+Ниже замените на id своего приложения:
+```
+returnUrl: 'chrome-extension://gpcindghocakhfbjmnamgnnjhgjjiijk/payment-success.html',
+failUrl: 'chrome-extension://gpcindghocakhfbjmnamgnnjhgjjiijk/payment-fail.html',
+```
+2. Скачайте node.js https://nodejs.org/en/download/prebuilt-installer
+3. Откройте репозиторий, перейдите в папку proxy-server:
+```
+cd proxy-server   
+```
+4. Установите зависимости:
+```
+npm install express cors node-fetch
+```
+5. В package.json добавьте:
+```
+"type": "module",
+```\
+5. В server.js заполните:
+```
+const TOKEN = 'ТОКЕН ПРИЛОЖЕНИЯ';
+```
+6. Запустите сервер:
+```
+node server.js 
+```
+7. Откройте Chrome и перейдите в раздел "Расширения" (введите `chrome://extensions/` в адресной строке).
+8. Включите "Режим разработчика" в правом верхнем углу страницы.
+9. Нажмите "Загрузить распакованное расширение" и выберите папку с расширением.
+10. Расширение установлено! Вы увидите иконку в правом верхнем углу браузера.
 
 ### 2. Установка Telegram-бота
 
