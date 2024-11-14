@@ -1,63 +1,56 @@
 import asyncio
-from database.redis_client import RedisClient
-from bot.services.parser import PriceParser
-from bot.services.notification_service import NotificationService
 import logging
+from datetime import datetime
+from typing import Dict, List
+from bot.services.parser import PriceParser
 
 class PriceChecker:
-    def __init__(self, redis_client: RedisClient, notification_service: NotificationService, batch_size: int = 50, timeout: int = 10):
+    def __init__(self, redis_client, notification_service, batch_size: int = 50):
         self.redis_client = redis_client
-        self.parser = PriceParser(max_concurrent_browsers=10)
         self.notification_service = notification_service
         self.batch_size = batch_size
-        self.timeout = timeout
-        logging.info("PriceChecker инициализирован")
+        self.parser = None
+        self.monitoring_interval = 600
+        self.retry_interval = 60
+        logging.info("PriceChecker initialized")
 
-    async def check_price_for_product(self, user_id: int, product: dict):
-        
-        product_url = product.get('product_url')
-        if not product_url:
-            logging.error(f"Отсутствует 'product_url' для продукта: {product}")
-            return
-
+    async def process_batch(self, batch_urls: List[str], user_product_map: Dict[str, list]):
         try:
-            current_price = await asyncio.wait_for(self.parser.get_price(product_url), timeout=240)
+            logging.info(f"Processing batch of {len(batch_urls)} URLs")
+            prices = await self.parser.get_prices_batch(batch_urls)
             
-            if current_price is None:
-                logging.error(f"Не удалось получить цену для '{product.get('title', 'No Title')}'")
-                return
-            
-            target_price = float(product.get('target_price', 0))
-
-            if current_price <= target_price:
-                is_parsed = await self.redis_client.is_already_parsed(user_id, product_url)
-
-                if not is_parsed:
-                    await self.notification_service.send_price_alert(
-                        user_id=user_id,
-                        product_title=product.get('title', 'No Title'),
-                        current_price=current_price,
-                        target_price=target_price,
-                        product_url=product_url
-                    )
-                    await self.redis_client.mark_as_parsed(user_id, product_url)
-                    logging.info(f"Уведомление отправлено и товар помечен для пользователя {user_id}")
-
-        except asyncio.TimeoutError:
-            logging.error(f"Таймаут при проверке цены для '{product.get('title', 'No Title')}'")
+            for url, price in prices.items():
+                if price is not None and url in user_product_map:
+                    for user_id, product in user_product_map[url]:
+                        target_price = float(product.get('target_price', 0))
+                        
+                        if price <= target_price:
+                            is_parsed = await self.redis_client.is_already_parsed(user_id, url)
+                            
+                            if not is_parsed:
+                                await self.notification_service.send_price_alert(
+                                    user_id=user_id,
+                                    product_title=product.get('title', 'Unknown'),
+                                    current_price=price,
+                                    target_price=target_price,
+                                    product_url=url
+                                )
+                                await self.redis_client.mark_as_parsed(user_id, url)
+                                logging.info(f"Price alert sent for user {user_id}, product: {product.get('title')}")
+                
         except Exception as e:
-            logging.error(f"Ошибка при проверке цены для '{product.get('title', 'No Title')}': {e}", exc_info=True)
-            
+            logging.error(f"Error processing batch: {e}", exc_info=True)
+
     async def start_monitoring(self):
-        logging.info("Запуск мониторинга цен")
-        async with self.parser:  # Используем контекстный менеджер для управления сессией
+        self.parser = PriceParser()
+        
+        async with self.parser:
             while True:
                 try:
                     users = await self.redis_client.get_all_users()
                     all_products = []
-                    user_product_map = {}  # Для хранения соответствия URL и информации о товаре/пользователе
+                    user_product_map = {}
 
-                    # Собираем все товары со всех пользователей
                     for user_id in users:
                         products = await self.redis_client.get_products(user_id)
                         if not products:
@@ -67,47 +60,36 @@ class PriceChecker:
                             url = product.get('product_url')
                             if url and not await self.redis_client.is_already_parsed(user_id, url):
                                 all_products.append(url)
-                                user_product_map[url] = (user_id, product)
+                                if url not in user_product_map:
+                                    user_product_map[url] = []
+                                user_product_map[url].append((user_id, product))
 
                     if not all_products:
-                        logging.info("Нет товаров для проверки")
-                        await asyncio.sleep(600)
+                        logging.info("No products to check, waiting...")
+                        await asyncio.sleep(self.retry_interval)
                         continue
 
-                    # Разбиваем все товары на пакеты
-                    for i in range(0, len(all_products), self.batch_size):
-                        batch_urls = all_products[i:i + self.batch_size]
-                        
-                        try:
-                            # Получаем цены для всего пакета
-                            prices = await self.parser.get_prices_batch(batch_urls, timeout=self.timeout)
-
-                            # Обрабатываем результаты
-                            for url, price in prices.items():
-                                if price is not None and url in user_product_map:
-                                    user_id, product = user_product_map[url]
-                                    target_price = float(product.get('target_price', 0))
-
-                                    if price <= target_price:
-                                        await self.notification_service.send_price_alert(
-                                            user_id=user_id,
-                                            product_title=product.get('title', 'No Title'),
-                                            current_price=price,
-                                            target_price=target_price,
-                                            product_url=url
-                                        )
-                                        await self.redis_client.mark_as_parsed(user_id, url)
-                                        logging.info(f"Уведомление отправлено для пользователя {user_id}, товар: {product.get('title')}")
-
-                        except Exception as e:
-                            logging.error(f"Ошибка при обработке пакета товаров: {e}", exc_info=True)
-
-                        # Небольшая пауза между пакетами
-                        await asyncio.sleep(1)
-
-                    logging.info("Завершена проверка всех товаров, ожидание следующей итерации (600 секунд)")
-                    await asyncio.sleep(600)
+                    # Разбиваем все товары на батчи
+                    batches = [all_products[i:i + self.batch_size] 
+                             for i in range(0, len(all_products), self.batch_size)]
+                    
+                    logging.info(f"Processing {len(batches)} batches ({len(all_products)} products total)")
+                    start_time = datetime.now()
+                    
+                    # Обрабатываем батчи параллельно
+                    tasks = []
+                    for batch in batches:
+                        task = asyncio.create_task(self.process_batch(batch, user_product_map))
+                        tasks.append(task)
+                    
+                    await asyncio.gather(*tasks)
+                    
+                    end_time = datetime.now()
+                    processing_time = (end_time - start_time).total_seconds()
+                    logging.info(f"Batch processing completed in {processing_time:.2f} seconds")
+                    
+                    await asyncio.sleep(self.monitoring_interval)
 
                 except Exception as e:
-                    logging.error(f"Ошибка в цикле мониторинга: {e}", exc_info=True)
-                    await asyncio.sleep(60)
+                    logging.error(f"Error in monitoring loop: {e}", exc_info=True)
+                    await asyncio.sleep(self.retry_interval)
