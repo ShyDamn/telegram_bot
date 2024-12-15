@@ -12,6 +12,7 @@ class PriceChecker:
         self.parser = None
         self.monitoring_interval = 600
         self.retry_interval = 60
+        self.pending_updates = {}
         logging.info("PriceChecker initialized")
 
     async def process_batch(self, batch_urls: List[str], user_product_map: Dict[str, list]):
@@ -19,14 +20,29 @@ class PriceChecker:
             logging.info(f"Processing batch of {len(batch_urls)} URLs")
             prices = await self.parser.get_prices_batch(batch_urls)
             
+            updates_by_user = {}
+            
             for url, price in prices.items():
                 if price is not None and url in user_product_map:
                     for user_id, product in user_product_map[url]:
-                        target_price = float(product.get('target_price', 0))
+                        current_price = float(product.get('price', 0))
+                        user_token = await self.redis_client.get_user_token(user_id)
                         
+                        if not user_token:
+                            continue
+
+                        update = {
+                            'product_url': url,
+                            'current_price': price
+                        }
+
+                        if user_token not in updates_by_user:
+                            updates_by_user[user_token] = []
+                        updates_by_user[user_token].append(update)
+
+                        target_price = float(product.get('target_price', 0))
                         if price <= target_price:
                             is_parsed = await self.redis_client.is_already_parsed(user_id, url)
-                            
                             if not is_parsed:
                                 await self.notification_service.send_price_alert(
                                     user_id=user_id,
@@ -37,7 +53,20 @@ class PriceChecker:
                                 )
                                 await self.redis_client.mark_as_parsed(user_id, url)
                                 logging.info(f"Price alert sent for user {user_id}, product: {product.get('title')}")
+
+            for user_token, updates in updates_by_user.items():
+                is_active = await self.parser.check_user_activity(user_token)
                 
+                if is_active:
+                    await self.parser.send_price_updates(user_token, updates)
+                    if user_token in self.pending_updates:
+                        await self.parser.send_price_updates(user_token, self.pending_updates[user_token])
+                        del self.pending_updates[user_token]
+                else:
+                    if user_token not in self.pending_updates:
+                        self.pending_updates[user_token] = []
+                    self.pending_updates[user_token].extend(updates)
+                    
         except Exception as e:
             logging.error(f"Error processing batch: {e}", exc_info=True)
 
@@ -69,14 +98,12 @@ class PriceChecker:
                         await asyncio.sleep(self.retry_interval)
                         continue
 
-                    # Разбиваем все товары на батчи
                     batches = [all_products[i:i + self.batch_size] 
                              for i in range(0, len(all_products), self.batch_size)]
                     
                     logging.info(f"Processing {len(batches)} batches ({len(all_products)} products total)")
                     start_time = datetime.now()
                     
-                    # Обрабатываем батчи параллельно
                     tasks = []
                     for batch in batches:
                         task = asyncio.create_task(self.process_batch(batch, user_product_map))
